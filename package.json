@@ -1,0 +1,23 @@
+{
+  "name": "circuit-breaker-axios",
+  "version": "1.0.0",
+  "description": "circuit breaker design pattern implementation for axios interceptors",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MohammadMMoniri/circuit-breaker-axios.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/MohammadMMoniri/circuit-breaker-axios/issues"
+  },
+  "homepage": "https://github.com/MohammadMMoniri/circuit-breaker-axios#readme",
+  "dependencies": {
+    "axios": "^1.2.2"
+  }
+}
