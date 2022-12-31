@@ -4,7 +4,7 @@ class InternalServerError extends Error {
     status = 500;
 }
 
-type CircuitBreakerConfig = {
+export type CircuitBreakerConfig = {
     // url of service
     readonly serviceUrl: string;
     // first timeout (it multiplies by 2 powers)
@@ -73,7 +73,7 @@ export class CircuitBreaker {
         from: 'close' | 'half' | 'open',
         to: 'close' | 'half' | 'open',
         originName: string,
-    ) => void;
+    ) => any;
 
     constructor(
         axiosRef: AxiosInstance,
@@ -83,7 +83,7 @@ export class CircuitBreaker {
             from: 'close' | 'half' | 'open',
             to: 'close' | 'half' | 'open',
             originName: string,
-        ) => void,
+        ) => any,
     ) {
         try {
             listOfServices.forEach((el) => {
@@ -105,10 +105,12 @@ export class CircuitBreaker {
 
             if (callback) this.changeStateCallback = callback;
 
-            axiosRef.interceptors.request.use(this.requestInterceptor);
+            axiosRef.interceptors.request.use(
+                this.requestInterceptor.bind(this),
+            );
             axiosRef.interceptors.response.use(
-                this.responseInterceptor,
-                this.responseErrorInterceptor,
+                this.responseInterceptor.bind(this),
+                this.responseErrorInterceptor.bind(this),
             );
         } catch (e) {
             throw e;
@@ -118,9 +120,10 @@ export class CircuitBreaker {
     protected requestInterceptor(config) {
         try {
             const origin = new URL(config.url).origin;
+
             if (this.circuitBreakerServices.includes(origin)) {
                 let originData = this.serviceData[origin];
-                originData.counter++;
+                originData.counter++;                
 
                 if (originData.state === 'open') {
                     this.open(originData, origin);
