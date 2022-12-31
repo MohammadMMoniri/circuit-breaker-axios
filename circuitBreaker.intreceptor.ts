@@ -1,214 +1,242 @@
+import { AxiosInstance } from 'axios';
+
 class InternalServerError extends Error {
-  status = 500;
+    status = 500;
 }
 
-type CircuitBreakerDataStructure = {
-  readonly timeout: number;
-  readonly maxRequest: number;
-  readonly failedPercentage: number;
-  readonly acceptableTimeOut: number;
-  readonly halfOpenPercentage: number;
-  readonly halfToCloseMinPercentage: number;
-  readonly halfOpenMaxRequests: number;
-  state: "close" | "half" | "open";
-  lastRequestTime: Date;
-  counter: number;
-  unsuccessfulCount: number;
-  consecutiveOpenCircuitCount: number;
+type CircuitBreakerConfig = {
+    // url of service
+    readonly serviceUrl: string;
+    // first timeout (it multiplies by 2 powers)
+    readonly timeout: number;
+    // count of requests for each open state circuit
+    readonly maxRequest: number;
+    // percentage to change state of circuit from close to open
+    readonly failedPercentage: number;
+    // not used yed
+    readonly acceptableTimeOut: number;
+    // percentage of requests that sent to destination in half-open state
+    readonly halfOpenPercentage: number;
+    // minimum percentage that must be to change state of circuit from half-open to close
+    readonly halfToCloseMinPercentage: number;
+    // count of requests that sent to destination in half-open state
+    readonly halfOpenMaxRequests: number;
 };
 
-export class CircuitBreakerInterceptor {
-  private static circuitBreakerServices = ["http://10.0.200.220:5000"];
+type CircuitBreakerDynamics = {
+    // state of circuit (close: requests sent, open: requests ignored, half(half-open): checks the destination)
+    state: 'close' | 'half' | 'open';
+    // time of last request
+    lastRequestTime: Date;
+    // count of requests in each state
+    counter: number;
+    // unsuccessful request count in each state
+    unsuccessfulCount: number;
+    // count of consecutive open circuit
+    consecutiveOpenCircuitCount: number;
+};
 
-  private static BaseCircuitBreakerData: CircuitBreakerDataStructure = {
-    timeout: 10 * 1000,
-    maxRequest: 50,
-    failedPercentage: 40,
-    halfOpenPercentage: 10,
-    halfOpenMaxRequests: 100,
-    halfToCloseMinPercentage: 80,
-    acceptableTimeOut: 4500,
-    state: "close",
-    counter: 0,
-    unsuccessfulCount: 0,
-    lastRequestTime: new Date(),
-    consecutiveOpenCircuitCount: 0,
-  };
+type CircuitBreakerDataStructure = Omit<
+    CircuitBreakerDynamics & CircuitBreakerConfig,
+    'serviceUrl'
+>;
 
-  private static serviceData = {};
-  private static changeStateCallback: (
-    from: "close" | "half" | "open",
-    to: "close" | "half" | "open",
-    originName: string
-  ) => void;
+export class CircuitBreaker {
+    private circuitBreakerServices: string[] = [];
 
-  public static setChangeStateCallback(
-    callback: (
-      from: "close" | "half" | "open",
-      to: "close" | "half" | "open",
-      originName: string
-    ) => void
-  ) {
-    CircuitBreakerInterceptor.changeStateCallback = callback;
-  }
+    private readonly BaseCircuitBreakerDataStatic: Omit<
+        CircuitBreakerConfig,
+        'serviceUrl'
+    > = {
+        timeout: 10 * 1000,
+        maxRequest: 50,
+        failedPercentage: 40,
+        halfOpenPercentage: 10,
+        halfOpenMaxRequests: 100,
+        halfToCloseMinPercentage: 80,
+        acceptableTimeOut: 4500,
+    };
 
-  static requestInterceptor(config) {
-    try {
-      const origin = new URL(config.url).origin;
-      if (CircuitBreakerInterceptor.circuitBreakerServices.includes(origin)) {
-        config.metadata = { startTime: new Date() };
-        let originData: CircuitBreakerDataStructure =
-          CircuitBreakerInterceptor.serviceData[origin];
+    private BaseCircuitBreakerDataDynamic: CircuitBreakerDynamics = {
+        state: 'close',
+        counter: 0,
+        unsuccessfulCount: 0,
+        lastRequestTime: new Date(),
+        consecutiveOpenCircuitCount: 0,
+    };
 
-        if (!originData) {
-          CircuitBreakerInterceptor.serviceData[origin] =
-            CircuitBreakerInterceptor.BaseCircuitBreakerData;
-          originData = CircuitBreakerInterceptor.serviceData[origin];
-        }
-        console.log(originData.state);
-        originData.counter++;
+    private serviceData: {
+        [key: string]: CircuitBreakerDataStructure;
+    } = {};
 
-        if (originData.state === "open") {
-          CircuitBreakerInterceptor.open(originData, origin);
-        } else if (originData.state === "half") {
-          CircuitBreakerInterceptor.half(originData, origin);
-        }
-      }
+    private changeStateCallback: (
+        from: 'close' | 'half' | 'open',
+        to: 'close' | 'half' | 'open',
+        originName: string,
+    ) => void;
 
-      return config;
-    } catch (e) {
-      e.config = config;
-      throw e;
-    }
-  }
-
-  protected static half(
-    originData: CircuitBreakerDataStructure,
-    originName: string
-  ) {
-    if (originData.counter >= originData.halfOpenMaxRequests) {
-      const requestCounts =
-        (originData.halfOpenMaxRequests * originData.halfOpenPercentage) / 100;
-      const realUnsuccessfulCount =
-        originData.unsuccessfulCount -
-        (originData.halfOpenMaxRequests - requestCounts);
-      if (
-        requestCounts - realUnsuccessfulCount >
-        (requestCounts * originData.halfToCloseMinPercentage) / 100
-      ) {
-        CircuitBreakerInterceptor.changeState(
-          "half",
-          "close",
-          originName,
-          originData
-        );
-      } else {
-        CircuitBreakerInterceptor.changeState(
-          "half",
-          "open",
-          originName,
-          originData
-        );
-      }
-    }
-
-    if (originData.counter % (100 / originData.halfOpenPercentage) === 0) {
-      return;
-    }
-    throw new InternalServerError();
-  }
-
-  protected static open(
-    originData: CircuitBreakerDataStructure,
-    originName: string
-  ) {
-    if (
-      originData.lastRequestTime.getTime() +
-        originData.timeout * 2 ** originData.consecutiveOpenCircuitCount <
-      new Date().getTime()
+    constructor(
+        axiosRef: AxiosInstance,
+        listOfServices: string[],
+        config: { [key: string]: CircuitBreakerConfig } = {},
+        callback?: (
+            from: 'close' | 'half' | 'open',
+            to: 'close' | 'half' | 'open',
+            originName: string,
+        ) => void,
     ) {
-      CircuitBreakerInterceptor.changeState(
-        "open",
-        "half",
-        originName,
-        originData
-      );
-    }
-    throw new InternalServerError();
-  }
+        try {
+            listOfServices.forEach((el) => {
+                new URL(el);
+                this.circuitBreakerServices.push(el);
+                let originConfig: CircuitBreakerDataStructure;
 
-  static responseInterceptor(response) {
-    response.config.metadata.endTime = new Date();
-    response.duration =
-      response.config.metadata.endTime - response.config.metadata.startTime;
+                config[el]
+                    ? (originConfig = {
+                          ...config[el],
+                          ...this.BaseCircuitBreakerDataDynamic,
+                      })
+                    : (originConfig = {
+                          ...this.BaseCircuitBreakerDataStatic,
+                          ...this.BaseCircuitBreakerDataDynamic,
+                      });
+                this.serviceData[el] = originConfig;
+            });
 
-    return response;
-  }
+            if (callback) this.changeStateCallback = callback;
 
-  protected static changeState(
-    from: "close" | "half" | "open",
-    to: "close" | "half" | "open",
-    originName: string,
-    originData: CircuitBreakerDataStructure
-  ) {
-    if (from === to) {
-      throw new Error();
-    }
-
-    originData.state = to;
-    originData.counter = 0;
-    originData.unsuccessfulCount = 0;
-    originData.lastRequestTime = new Date();
-
-    if (from === "half" && to === "open") {
-      originData.consecutiveOpenCircuitCount++;
-      console.log(originData.consecutiveOpenCircuitCount);
-    } else if (from === "open" && to === "half") {
-    } else {
-      originData.consecutiveOpenCircuitCount = 0;
+            axiosRef.interceptors.request.use(this.requestInterceptor);
+            axiosRef.interceptors.response.use(
+                this.responseInterceptor,
+                this.responseErrorInterceptor,
+            );
+        } catch (e) {
+            throw e;
+        }
     }
 
-    if (CircuitBreakerInterceptor.changeStateCallback)
-      return CircuitBreakerInterceptor.changeStateCallback(
-        from,
-        to,
-        originName
-      );
-    return;
-  }
+    protected requestInterceptor(config) {
+        try {
+            const origin = new URL(config.url).origin;
+            if (this.circuitBreakerServices.includes(origin)) {
+                let originData = this.serviceData[origin];
+                originData.counter++;
 
-  static responseErrorInterceptor(error) {
-    const origin = new URL(error.config?.url || error.url).origin;
-    const status = error.response?.status || null;
+                if (originData.state === 'open') {
+                    this.open(originData, origin);
+                } else if (originData.state === 'half') {
+                    this.half(originData, origin);
+                }
+            }
 
-    if (
-      (status === null || status % 500 < 100) &&
-      CircuitBreakerInterceptor.circuitBreakerServices.includes(origin)
+            return config;
+        } catch (e) {
+            e.config = config;
+            throw e;
+        }
+    }
+
+    protected half(
+        originData: CircuitBreakerDataStructure,
+        originName: string,
     ) {
-      let originData: CircuitBreakerDataStructure =
-        CircuitBreakerInterceptor.serviceData[origin];
-      console.log(
-        originData.failedPercentage,
-        originData.unsuccessfulCount,
-        originData.maxRequest,
-        originData.counter
-      );
-      originData.unsuccessfulCount++;
+        if (originData.counter >= originData.halfOpenMaxRequests) {
+            const requestCounts =
+                (originData.halfOpenMaxRequests *
+                    originData.halfOpenPercentage) /
+                100;
+            const realUnsuccessfulCount =
+                originData.unsuccessfulCount -
+                (originData.halfOpenMaxRequests - requestCounts);
+            if (
+                requestCounts - realUnsuccessfulCount >
+                (requestCounts * originData.halfToCloseMinPercentage) / 100
+            ) {
+                this.changeState('half', 'close', originName, originData);
+            } else {
+                this.changeState('half', 'open', originName, originData);
+            }
+        }
 
-      if (originData.state === "close") {
+        if (originData.counter % (100 / originData.halfOpenPercentage) === 0) {
+            return;
+        }
+        throw new InternalServerError();
+    }
+
+    protected open(
+        originData: CircuitBreakerDataStructure,
+        originName: string,
+    ) {
         if (
-          originData.failedPercentage <
-          (originData.unsuccessfulCount / originData.maxRequest) * 100
+            originData.lastRequestTime.getTime() +
+                originData.timeout *
+                    2 ** originData.consecutiveOpenCircuitCount <
+            new Date().getTime()
         ) {
-          CircuitBreakerInterceptor.changeState(
-            "close",
-            "open",
-            origin,
-            originData
-          );
+            this.changeState('open', 'half', originName, originData);
         }
-      }
+        throw new InternalServerError();
     }
-    return error;
-  }
+
+    protected responseInterceptor(response) {
+        response.config.metadata.endTime = new Date();
+        response.duration =
+            response.config.metadata.endTime -
+            response.config.metadata.startTime;
+
+        return response;
+    }
+
+    protected changeState(
+        from: 'close' | 'half' | 'open',
+        to: 'close' | 'half' | 'open',
+        originName: string,
+        originData: CircuitBreakerDataStructure,
+    ) {
+        if (from === to) {
+            throw new Error();
+        }
+
+        originData.state = to;
+        originData.counter = 0;
+        originData.unsuccessfulCount = 0;
+        originData.lastRequestTime = new Date();
+
+        if (!(from === 'open' && to === 'half')) {
+            if (from === 'half' && to === 'open') {
+                originData.consecutiveOpenCircuitCount++;
+            } else {
+                originData.consecutiveOpenCircuitCount = 0;
+            }
+        }
+
+        if (this.changeStateCallback)
+            return this.changeStateCallback(from, to, originName);
+        return;
+    }
+
+    protected responseErrorInterceptor(error) {
+        const origin = new URL(error.config?.url || error.url).origin;
+        const status = error.response?.status || null;
+
+        if (
+            (status === null || status % 500 < 100) &&
+            this.circuitBreakerServices.includes(origin)
+        ) {
+            let originData: CircuitBreakerDataStructure =
+                this.serviceData[origin];
+            originData.unsuccessfulCount++;
+
+            if (originData.state === 'close') {
+                if (
+                    originData.failedPercentage <
+                    (originData.unsuccessfulCount / originData.maxRequest) * 100
+                ) {
+                    this.changeState('close', 'open', origin, originData);
+                }
+            }
+        }
+        return error;
+    }
 }
